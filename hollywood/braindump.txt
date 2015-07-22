@@ -1,0 +1,172 @@
+######### HOLLYWOOD #########
+
+I'll call the original code all the bytes that are shown as part of a function in the web debugger
+We start by copying 0x1100 bytes from 4634-5734 to 2400-3500, that's copying all the data after the original code at 0x2400
+We'll call that initial copied data the stage1 data, and the data after copying the stage1
+
+Then we copy 0x1200 bytes of the stage1 (longer than the stage1!) from 0x2400 to 0x1400, this'll end at 0x3800
+We call this new copied data at 0x1400-0x3800 the stage2
+
+# main:
+This is the start of the main loop of the program
+On the first run of this function, we're running it with fixed address space layout
+
+Every iteration of the function, we create a first small ASLR buffer,
+decrypt payload code into it, then execute that payload.
+The payload returns to us, then we create a second ASLR buffer.
+We copy ourselves into that new ALSR buffer, erase ourselves from the current buffer, 
+and jump in the new buffer for the next iteration.
+
+R12 is used as the address of the next code buffer, it is used by both main and the code buffers.
+Each buffer must set R12 for the next buffer.
+R13 is used as a return address to main and set by main. 
+R10,R11,R13,R14,R15 are reserved for main
+SR,R4,R5,R6,R7,R8,R9 are reserved for the buffer code
+
+# Decrypted code buffers:
+On entry of the first buffer, this is the state of the registers on a sample run:
+pc  efcc  sp  4400  sr  0003  cg  0000
+r04 0000  r05 5a08  r06 0000  r07 0000
+r08 0000  r09 0000  r10 161a  r11 160c
+r12 efcc  r13 4536  r14 efcc  r15 feb1
+
+And following is the "light" disassembly of the buffers up to buf69 included.
+We don't have the address of the next buffers yet.
+=> It was 0x1616, now here's the complete "light" disassembly:
+
+Python>printLightDisassembly()
+sub.w   #8, SP
+; Print text message
+mov.w   #8000h, SR
+mov.w   #57h, arg_4(SP)
+call    #10h
+mov.w   #68h, arg_4(SP)
+call    #10h
+mov.w   #61h, arg_4(SP)
+call    #10h
+mov.w   #74h, arg_4(SP)
+call    #10h
+mov.w   #27h, arg_4(SP)
+call    #10h
+mov.w   #73h, arg_4(SP)
+call    #10h
+mov.w   #20h, arg_4(SP)
+call    #10h
+mov.w   #74h, arg_4(SP)
+call    #10h
+mov.w   #68h, arg_4(SP)
+call    #10h
+mov.w   #65h, arg_4(SP)
+call    #10h
+mov.w   #20h, arg_4(SP)
+call    #10h
+mov.w   #70h, arg_4(SP)
+call    #10h
+mov.w   #61h, arg_4(SP)
+call    #10h
+mov.w   #73h, arg_4(SP)
+call    #10h
+mov.w   #73h, arg_4(SP)
+call    #10h
+mov.w   #77h, arg_4(SP)
+call    #10h
+mov.w   #6Fh, arg_4(SP)
+call    #10h
+mov.w   #72h, arg_4(SP)
+call    #10h
+mov.w   #64h, arg_4(SP)
+call    #10h
+mov.w   #3Fh, arg_4(SP)
+call    #10h
+; Ask for max 0x100 bytes of password input at 0x2600
+mov.w   #2600h, arg_4(SP)
+mov.w   #100h, arg_6(SP)
+mov.w   #8200h, SR
+call    #10h
+; Start hashing the password
+mov.w   #2600h, R5
+clr.w   R6
+; Start of the hash loop, we jump back here for each word
+add.w   @R5, R4
+swpb    R4
+xor.w   @R5+, R6
+xor.w   R4, R6
+xor.w   R6, R4
+xor.w   R4, R6
+tst.w   0(R5)
+mov.w   SR, R7
+and.w   #2, R7
+rra.w   R7
+xor.w   #1, R7
+swpb    R7
+rra.w   R7
+sxt     R7
+swpb    R7
+sxt     R7
+mov.w   #4B18h, R8
+and.w   R7, R8
+inv.w   R7
+and.w   #47AAh, R7
+add.w   R7, R8
+clr.w   R7
+; At this point R8 becomes R12, and we use that as a branch
+; Essentially, we loop back until we reach a null word
+; If we continue, we then test the pass hash (R4 and R6)
+; If it's not correct I assume we set the poweroff bit in SR,
+; otherwise we continue to the last two buffers and open the lock
+cmp.w   #0FEB1h, R4
+mov.w   SR, R7
+clr.w   R4
+cmp.w   #9298h, R6
+and.w   SR, R7
+clr.w   R6
+rra.w   R7
+xor.w   #1, R7
+swpb    R7
+rra.w   R7
+rra.w   R7
+rra.w   R7
+rra.w   R7
+bis.w   R7, SR
+mov.w   #0FF00h, SR
+call    #10h
+
+
+Shellcode to web debugger commands conversion script:
+s='3540002606432455841036e506e404e606e485930000074227f3071117e3871007118711871087113840184b08f737e337f0aa4708570743'
+s='2455841036e506e404e606e485930000304020003240ffff'
+i=0
+r=''
+while i<len(s):
+	r+='let '+format(0x20+i/2,'04X')+'='+s[i+2]+s[i+3]+s[i]+s[i+1]+';'
+	i+=4
+
+print(r)
+
+At 0x2600 it's the password input, so we're using the input in the computations.
+We use SR from tst 0(r15) to compute the next R12, so where we jump depends
+on whether the input word is null
+With SR=1 we get R12=0x4B18 => This jumps back to buf48! It's a loop to process the input!
+With SR=3 we get R12=0x47AA => This jumps to 0x1616, probably the next buf when input is processed
+
+=> buf84 and buf85 seem to unlock the door, we want to jump to buf84!
+
+=> TODO: Check that we decrypted buf85 correctly
+==> We did.
+
+=> Okay so we need to find a pass that goes through this little algorithm and we're golden
+==> We could just implment it in C and run rockyou on it, or bruteforce it
+==> Could also try to invert it, but not sure if that's possible. At least partially invert?
+===> Nope, can't do it. Turns out I'm not a cryptographer.
+
+=> Let's get the hash of just a simple 2 character password. It's a pain to step through, but then we can do it in C.
+=> Hash of pasword A9:
+=> On the first loop r04=3941, r06=4139
+
+=> We realy want r4==0xFEB1 && r6==0x9298;
+
+=> Brute force gave us this result: DDDD4A210096
+==> Doesn't actually work, why?
+===> I'm an idiot, those are in the wrong endianness, we want DDDD214A96
+YESSSS :D
+

